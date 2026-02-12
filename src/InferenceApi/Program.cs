@@ -1,41 +1,90 @@
+using Prometheus;
+using Shared.Contracts;
+using Shared.Telemetry;
+using System.Diagnostics;
+using OpenTelemetry.Trace;
+using OpenTelemetry.Resources;
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource =>
+        resource.AddService(TelemetryConstants.ServiceNameInference))
+    .WithTracing(tracing =>
+    {
+        tracing
+            .AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation()
+            .AddOtlpExporter();
+    });
+
+builder.Services.AddHealthChecks();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-}
+app.UseRouting();
 
-app.UseHttpsRedirection();
+app.UseHttpMetrics(); // Prometheus HTTP metrics
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
+app.MapHealthChecks("/healthz");
+app.MapHealthChecks("/readyz");
 
-app.MapGet("/weatherforecast", () =>
+var predictionCounter = Metrics.CreateCounter(
+    TelemetryConstants.MetricFallbackRate,
+    "Number of fallback predictions");
+
+var predictionLatency = Metrics.CreateHistogram(
+  TelemetryConstants.MetricPredictionLatency,
+  "Latency of prediction requests in ms",
+  new HistogramConfiguration
+  {
+      Buckets = Histogram.ExponentialBuckets(5, 2, 8)
+  });
+
+app.MapGet("/model", () =>
 {
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
+    return Results.Ok(new
+    {
+        modelVersion = "v0-dev",
+        featureSchemaVersion = "v1",
+        trainedAtUtc = DateTime.UtcNow,
+        mae = 12.3,
+        p90Error = 25.7
+    });
+});
+
+app.MapPost("/predict", (OrderEvent order) =>
+{
+    var stopwatch = Stopwatch.StartNew();
+
+    var activity = Activity.Current;
+    activity?.SetTag("order.id", order.OrderId);
+    activity?.SetTag("sku.category", order.SkuCategory);
+
+    // Fake model logic
+    var predicted = order.ComponentCount * 12.5;
+    var uncertainty = 0.15;
+
+    var fallbackUsed = false;
+
+    var result = new PredictionResult(
+        order.OrderId,
+        predicted,
+        uncertainty,
+        ModelVersion: "v0-dev",
+        FeatureSchemaVersion: "v1",
+        FallbackUsed: fallbackUsed
+    );
+
+    stopwatch.Stop();
+    predictionLatency.Observe(stopwatch.Elapsed.TotalMilliseconds);
+
+    if (fallbackUsed)
+        predictionCounter.Inc();
+
+    return Results.Ok(result);
+});
+
+app.MapMetrics(); // Prometheus /metrics endpoint
 
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
