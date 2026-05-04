@@ -1,7 +1,6 @@
 # ML Observable Prediction Platform
 
-Production-grade ML system for build-time prediction with drift monitoring, safe rollout (shadow/canary), kill-switches, and full tracing.
-
+Architecture-first ML platform exploring drift monitoring, safe rollout, and observable inference.
 ---
 
 ## 🎯 Problem
